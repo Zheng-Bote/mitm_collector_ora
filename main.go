@@ -1,0 +1,462 @@
+/**
+ * SPDX-FileComment: Oracle Employee Collector
+ * SPDX-FileType: SOURCE
+ * SPDX-FileContributor: ZHENG Robert
+ * SPDX-FileCopyrightText: 2026 ZHENG Robert
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * @file main.go
+ * @brief Autonomous collector retrieving data from an Oracle database table, encrypting it, and saving it to RAW tables.
+ * @version 1.0.0
+ * @date 2026-06-04
+ *
+ * @author ZHENG Robert (robert@hase-zheng.net)
+ * @copyright Copyright (c) 2026 ZHENG Robert
+ * @license Apache-2.0
+ */
+
+package main
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/sijms/go-ora/v2"
+)
+
+// TargetDBConfig defines parameters for the MitM target database passed via JSON CLI argument
+type TargetDBConfig struct {
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	User         string `json:"user"`
+	Password     string `json:"password"`
+	Database     string `json:"database"`
+	DSN          string `json:"dsn"`
+	Table        string `json:"table"`         // Oracle table to read from
+	SourceName   string `json:"source_name"`   // Defaults to "ORA_EMPLOYEE"
+	CursorColumn string `json:"cursor_column"` // Defaults to "id" or "ID"
+	Topic        string `json:"topic"`         // Defaults to "oracle.<table_name>.data"
+}
+
+// SourceDBConfig defines decrypted credentials for the Oracle source database
+type SourceDBConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	Database string `json:"database"`
+	Service  string `json:"service"`
+	SID      string `json:"sid"`
+	DSN      string `json:"dsn"`
+}
+
+// StatusEvent is sent to the scheduler Unix socket
+type StatusEvent struct {
+	RunID    int    `json:"run_id"`
+	Type     string `json:"type"` // "status" or "audit"
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+	Progress int    `json:"progress"`
+}
+
+// IPCClient handles communicating status updates to the parent scheduler
+type IPCClient struct {
+	SocketPath string
+	RunID      int
+}
+
+func (c *IPCClient) SendEvent(status, message string, progress int) {
+	if c == nil || c.SocketPath == "" {
+		return
+	}
+	conn, err := net.Dial("unix", c.SocketPath)
+	if err != nil {
+		log.Printf("[IPC ERROR] Failed to connect to scheduler socket: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	event := StatusEvent{
+		RunID:    c.RunID,
+		Type:     "status",
+		Status:   status,
+		Message:  message,
+		Progress: progress,
+	}
+	data, _ := json.Marshal(event)
+	_, _ = conn.Write(append(data, '\n'))
+}
+
+func (c *IPCClient) SendAudit(message string) {
+	if c == nil || c.SocketPath == "" {
+		return
+	}
+	conn, err := net.Dial("unix", c.SocketPath)
+	if err != nil {
+		log.Printf("[IPC ERROR] Failed to connect to scheduler socket: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	event := StatusEvent{
+		RunID:   c.RunID,
+		Type:    "audit",
+		Message: message,
+	}
+	data, _ := json.Marshal(event)
+	_, _ = conn.Write(append(data, '\n'))
+}
+
+func cleanValue(val interface{}) interface{} {
+	if val == nil {
+		return nil
+	}
+	switch v := val.(type) {
+	case []byte:
+		return string(v)
+	case time.Time:
+		return v.Format(time.RFC3339)
+	default:
+		return v
+	}
+}
+
+func main() {
+	// 1. Check arguments
+	if len(os.Args) < 2 {
+		log.Fatal("Usage: collector <json_database_config>")
+	}
+
+	jsonConfig := os.Args[1]
+
+	// 2. Load IPC Environment
+	var ipc *IPCClient
+	runIDStr := os.Getenv("RUN_ID")
+	socketPath := os.Getenv("SCHEDULER_SOCKET_PATH")
+	if runIDStr != "" && socketPath != "" {
+		runID, err := strconv.Atoi(runIDStr)
+		if err == nil {
+			ipc = &IPCClient{
+				SocketPath: socketPath,
+				RunID:      runID,
+			}
+		}
+	}
+
+	ipc.SendEvent("started", "Oracle table collector program started", 0)
+
+	// 3. Parse Target DB configuration
+	var targetCfg TargetDBConfig
+	if err := json.Unmarshal([]byte(jsonConfig), &targetCfg); err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to parse MitM database JSON config: %v", err), 0)
+		log.Fatalf("Failed to parse MitM JSON configuration: %v", err)
+	}
+
+	if targetCfg.SourceName == "" {
+		targetCfg.SourceName = "ORA_EMPLOYEE"
+	}
+	if targetCfg.Table == "" {
+		ipc.SendEvent("failed", "Missing required field 'table' in configuration", 0)
+		log.Fatal("Missing required field 'table' in configuration")
+	}
+	if targetCfg.CursorColumn == "" {
+		targetCfg.CursorColumn = "ID"
+	}
+	if targetCfg.Topic == "" {
+		targetCfg.Topic = fmt.Sprintf("oracle.%s.data", strings.ToLower(targetCfg.Table))
+	}
+
+	var mitmDSN string
+	if targetCfg.DSN != "" {
+		mitmDSN = targetCfg.DSN
+	} else {
+		mitmDSN = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			targetCfg.User, targetCfg.Password, targetCfg.Host, targetCfg.Port, targetCfg.Database)
+	}
+
+	ctx := context.Background()
+
+	// 4. Connect to MitM target database (PostgreSQL)
+	mitmPool, err := pgxpool.New(ctx, mitmDSN)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to connect to MitM database: %v", err), 0)
+		log.Fatalf("Failed to connect to MitM database: %v", err)
+	}
+	defer mitmPool.Close()
+
+	ipc.SendEvent("processing", "Connected to MitM database", 20)
+
+	// 5. Load KEK from environment
+	masterKey := os.Getenv("MASTER_KEY")
+	if masterKey == "" {
+		ipc.SendEvent("failed", "Missing MASTER_KEY environment variable", 0)
+		log.Fatal("Missing MASTER_KEY environment variable")
+	}
+
+	var kek []byte
+	if decoded, err := base64.StdEncoding.DecodeString(masterKey); err == nil {
+		kek = decoded
+	} else {
+		kek = []byte(masterKey)
+	}
+
+	// Adjust KEK to 32 bytes if necessary
+	if len(kek) != 32 {
+		adjusted := make([]byte, 32)
+		copy(adjusted, kek)
+		kek = adjusted
+	}
+
+	// 6. Query encrypted source credentials
+	var configPayload []byte
+	var credentialsNonce []byte
+	var dekID string
+
+	err = mitmPool.QueryRow(ctx, `
+		SELECT config_payload, nonce, dek_id 
+		FROM source_credentials 
+		WHERE source_name = $1 AND is_active = true 
+		LIMIT 1
+	`, targetCfg.SourceName).Scan(&configPayload, &credentialsNonce, &dekID)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to load source credentials for '%s': %v", targetCfg.SourceName, err), 0)
+		log.Fatalf("Failed to load source credentials: %v", err)
+	}
+
+	// 7. Query wrapped DEK
+	var wrappedKey []byte
+	err = mitmPool.QueryRow(ctx, `
+		SELECT wrapped_key 
+		FROM storage_keys 
+		WHERE id = $1 AND is_active = true 
+		LIMIT 1
+	`, dekID).Scan(&wrappedKey)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to load wrapped DEK (ID: %s): %v", dekID, err), 0)
+		log.Fatalf("Failed to load wrapped DEK: %v", err)
+	}
+
+	// 8. Decrypt wrapped DEK using KEK
+	if len(wrappedKey) < 12 {
+		ipc.SendEvent("failed", "Wrapped DEK is too short", 0)
+		log.Fatal("Wrapped DEK in database is invalid")
+	}
+	dekNonce := wrappedKey[:12]
+	wrappedCipher := wrappedKey[12:]
+
+	kekBlock, err := aes.NewCipher(kek)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to initialize AES cipher with KEK: %v", err), 0)
+		log.Fatalf("Failed to initialize AES cipher: %v", err)
+	}
+	kekGCM, err := cipher.NewGCM(kekBlock)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to initialize GCM with KEK: %v", err), 0)
+		log.Fatalf("Failed to initialize GCM: %v", err)
+	}
+	dek, err := kekGCM.Open(nil, dekNonce, wrappedCipher, nil)
+	if err != nil {
+		ipc.SendEvent("failed", "Failed to decrypt wrapped DEK (KEK mismatch or corrupted key data)", 0)
+		log.Fatalf("Failed to decrypt DEK: %v", err)
+	}
+
+	ipc.SendAudit("Decrypted storage DEK using KEK successfully")
+
+	// 9. Decrypt source connection credentials payload using DEK
+	dekBlock, err := aes.NewCipher(dek)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to initialize AES cipher with DEK: %v", err), 0)
+		log.Fatalf("Failed to initialize DEK AES cipher: %v", err)
+	}
+	dekGCM, err := cipher.NewGCM(dekBlock)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to initialize GCM with DEK: %v", err), 0)
+		log.Fatalf("Failed to initialize DEK GCM: %v", err)
+	}
+	decryptedConfigBytes, err := dekGCM.Open(nil, credentialsNonce, configPayload, nil)
+	if err != nil {
+		ipc.SendEvent("failed", "Failed to decrypt source config payload using DEK", 0)
+		log.Fatalf("Failed to decrypt source config: %v", err)
+	}
+
+	ipc.SendAudit("Decrypted Oracle connection credentials payload successfully")
+
+	// 10. Parse source database configuration
+	var sourceCfg SourceDBConfig
+	if err := json.Unmarshal(decryptedConfigBytes, &sourceCfg); err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to parse decrypted Oracle configuration: %v", err), 0)
+		log.Fatalf("Failed to parse decrypted source config: %v", err)
+	}
+
+	var oracleDSN string
+	if sourceCfg.DSN != "" {
+		oracleDSN = sourceCfg.DSN
+	} else {
+		// Build connection url for github.com/sijms/go-ora/v2
+		dbName := sourceCfg.Service
+		if dbName == "" {
+			dbName = sourceCfg.SID
+		}
+		if dbName == "" {
+			dbName = sourceCfg.Database
+		}
+		oracleDSN = fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
+			sourceCfg.User, sourceCfg.Password, sourceCfg.Host, sourceCfg.Port, dbName)
+	}
+
+	// 11. Connect to Oracle source database
+	oracleDB, err := sql.Open("oracle", oracleDSN)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to connect to Oracle source database: %v", err), 0)
+		log.Fatalf("Failed to connect to Oracle source: %v", err)
+	}
+	defer oracleDB.Close()
+
+	if err := oracleDB.Ping(); err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to ping Oracle source database: %v", err), 0)
+		log.Fatalf("Failed to ping Oracle source: %v", err)
+	}
+
+	ipc.SendEvent("processing", "Connected to Oracle source database", 50)
+	ipc.SendAudit("Connected to Oracle source database successfully")
+
+	// 12. Retrieve cursor from MitM database
+	var lastCursor string
+	err = mitmPool.QueryRow(ctx, "SELECT last_cursor FROM ingestion_cursors WHERE source_name = $1", targetCfg.SourceName).Scan(&lastCursor)
+	if err != nil && err != pgx.ErrNoRows {
+		log.Printf("Warning: Failed to load cursor: %v", err)
+	}
+
+	// 13. Query Oracle table
+	var query string
+	var queryArgs []interface{}
+	if lastCursor != "" {
+		query = fmt.Sprintf("SELECT * FROM %s WHERE %s > :1 ORDER BY %s ASC", 
+			targetCfg.Table, targetCfg.CursorColumn, targetCfg.CursorColumn)
+		queryArgs = append(queryArgs, lastCursor)
+	} else {
+		query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s ASC", 
+			targetCfg.Table, targetCfg.CursorColumn)
+	}
+
+	rows, err := oracleDB.Query(query, queryArgs...)
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to execute query on Oracle table '%s': %v", targetCfg.Table, err), 0)
+		log.Fatalf("Failed to query Oracle: %v", err)
+	}
+	defer rows.Close()
+
+	// 14. Iterate and ingest records dynamically
+	cols, err := rows.Columns()
+	if err != nil {
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to load table column metadata: %v", err), 0)
+		log.Fatalf("Failed to load columns: %v", err)
+	}
+
+	cursorColIdx := -1
+	for idx, colName := range cols {
+		if strings.EqualFold(colName, targetCfg.CursorColumn) {
+			cursorColIdx = idx
+			break
+		}
+	}
+
+	recordsIngested := 0
+	maxCursorValue := ""
+
+	ipc.SendEvent("processing", "Preparing dynamic record ingestion", 70)
+
+	for rows.Next() {
+		// Slice of interfaces to hold raw values scanned
+		values := make([]interface{}, len(cols))
+		valuePtrs := make([]interface{}, len(cols))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		err = rows.Scan(valuePtrs...)
+		if err != nil {
+			log.Printf("Failed to scan Oracle row: %v", err)
+			continue
+		}
+
+		// Map column names to values
+		rowMap := make(map[string]interface{})
+		var currentCursorVal string
+
+		for i, colName := range cols {
+			cleaned := cleanValue(values[i])
+			rowMap[colName] = cleaned
+
+			// Keep track of cursor value for this row
+			if i == cursorColIdx && cleaned != nil {
+				currentCursorVal = fmt.Sprintf("%v", cleaned)
+			}
+		}
+
+		// Convert map to JSON
+		rowJSON, err := json.Marshal(rowMap)
+		if err != nil {
+			log.Printf("Failed to marshal row to JSON: %v", err)
+			continue
+		}
+
+		// Generate random 12-byte nonce
+		nonce := make([]byte, 12)
+		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+			log.Printf("Failed to generate random nonce: %v", err)
+			continue
+		}
+
+		// Encrypt payload via AES-GCM using storage DEK
+		encryptedPayload := dekGCM.Seal(nil, nonce, rowJSON, nil)
+
+		// Insert into raw_ingestion in target database
+		_, err = mitmPool.Exec(ctx, `
+			INSERT INTO raw_ingestion (topic, source_system, correlation_id, payload, nonce, dek_id, status)
+			VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, 'pending')
+		`, targetCfg.Topic, targetCfg.SourceName, encryptedPayload, nonce, dekID)
+		if err != nil {
+			log.Printf("Failed to insert raw fragment: %v", err)
+			continue
+		}
+
+		recordsIngested++
+		if currentCursorVal != "" {
+			maxCursorValue = currentCursorVal
+		}
+	}
+
+	// 15. Update cursor if records were ingested
+	if recordsIngested > 0 && maxCursorValue != "" {
+		_, err = mitmPool.Exec(ctx, `
+			INSERT INTO ingestion_cursors (source_name, last_cursor, updated_at)
+			VALUES ($1, $2, NOW())
+			ON CONFLICT (source_name) 
+			DO UPDATE SET last_cursor = EXCLUDED.last_cursor, updated_at = NOW()
+		`, targetCfg.SourceName, maxCursorValue)
+		if err != nil {
+			log.Printf("Failed to save current cursor state: %v", err)
+		}
+		ipc.SendAudit(fmt.Sprintf("Ingested %d Oracle records. Cursor updated to %s.", recordsIngested, maxCursorValue))
+	}
+
+	// 16. Finish execution
+	ipc.SendEvent("finished", fmt.Sprintf("Successfully processed and ingested %d Oracle records into RAW table", recordsIngested), 100)
+	log.Printf("Collector finished. Ingested %d records.", recordsIngested)
+}
