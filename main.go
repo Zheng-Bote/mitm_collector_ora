@@ -62,6 +62,14 @@ type SourceDBConfig struct {
 	DSN      string `json:"dsn"`
 }
 
+// CollectorArgs defines optional runtime arguments passed by the scheduler as JSON
+type CollectorArgs struct {
+	SourceName   string `json:"source_name"`
+	Table        string `json:"table"`
+	CursorColumn string `json:"cursor_column"`
+	Topic        string `json:"topic"`
+}
+
 // StatusEvent is sent to the scheduler Unix socket
 type StatusEvent struct {
 	RunID    int    `json:"run_id"`
@@ -171,6 +179,28 @@ func main() {
 	tableName := "EMPLOYEES"
 	cursorColumn := "ID"
 	topicName := "employee.data"
+
+	// 3b. Parse optional collector arguments from scheduler (os.Args[2])
+	if len(os.Args) >= 3 {
+		var colArgs CollectorArgs
+		if err := json.Unmarshal([]byte(os.Args[2]), &colArgs); err == nil {
+			if colArgs.SourceName != "" {
+				targetCfg.SourceName = colArgs.SourceName
+			}
+			if colArgs.Table != "" {
+				tableName = colArgs.Table
+				topicName = fmt.Sprintf("oracle.%s.data", strings.ToLower(tableName))
+			}
+			if colArgs.CursorColumn != "" {
+				cursorColumn = colArgs.CursorColumn
+			}
+			if colArgs.Topic != "" {
+				topicName = colArgs.Topic
+			}
+		} else {
+			log.Printf("Warning: Failed to parse collector arguments from os.Args[2]: %v", err)
+		}
+	}
 
 	var mitmDSN string
 	if targetCfg.DSN != "" {
