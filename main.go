@@ -41,16 +41,13 @@ import (
 
 // TargetDBConfig defines parameters for the MitM target database passed via JSON CLI argument
 type TargetDBConfig struct {
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	User         string `json:"user"`
-	Password     string `json:"password"`
-	Database     string `json:"database"`
-	DSN          string `json:"dsn"`
-	Table        string `json:"table"`         // Oracle table to read from
-	SourceName   string `json:"source_name"`   // Defaults to "ORA_EMPLOYEE"
-	CursorColumn string `json:"cursor_column"` // Defaults to "id" or "ID"
-	Topic        string `json:"topic"`         // Defaults to "oracle.<table_name>.data"
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	User       string `json:"user"`
+	Password   string `json:"password"`
+	Database   string `json:"database"`
+	DSN        string `json:"dsn"`
+	SourceName string `json:"source_name"` // Defaults to "ORA_EMPLOYEE"
 }
 
 // SourceDBConfig defines decrypted credentials for the Oracle source database
@@ -170,16 +167,10 @@ func main() {
 	if targetCfg.SourceName == "" {
 		targetCfg.SourceName = "ORA_EMPLOYEE"
 	}
-	if targetCfg.Table == "" {
-		ipc.SendEvent("failed", "Missing required field 'table' in configuration", 0)
-		log.Fatal("Missing required field 'table' in configuration")
-	}
-	if targetCfg.CursorColumn == "" {
-		targetCfg.CursorColumn = "ID"
-	}
-	if targetCfg.Topic == "" {
-		targetCfg.Topic = fmt.Sprintf("oracle.%s.data", strings.ToLower(targetCfg.Table))
-	}
+
+	tableName := "EMPLOYEES"
+	cursorColumn := "ID"
+	topicName := "employee.data"
 
 	var mitmDSN string
 	if targetCfg.DSN != "" {
@@ -347,16 +338,16 @@ func main() {
 	var queryArgs []interface{}
 	if lastCursor != "" {
 		query = fmt.Sprintf("SELECT * FROM %s WHERE %s > :1 ORDER BY %s ASC", 
-			targetCfg.Table, targetCfg.CursorColumn, targetCfg.CursorColumn)
+			tableName, cursorColumn, cursorColumn)
 		queryArgs = append(queryArgs, lastCursor)
 	} else {
 		query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s ASC", 
-			targetCfg.Table, targetCfg.CursorColumn)
+			tableName, cursorColumn)
 	}
 
 	rows, err := oracleDB.Query(query, queryArgs...)
 	if err != nil {
-		ipc.SendEvent("failed", fmt.Sprintf("Failed to execute query on Oracle table '%s': %v", targetCfg.Table, err), 0)
+		ipc.SendEvent("failed", fmt.Sprintf("Failed to execute query on Oracle table '%s': %v", tableName, err), 0)
 		log.Fatalf("Failed to query Oracle: %v", err)
 	}
 	defer rows.Close()
@@ -370,7 +361,7 @@ func main() {
 
 	cursorColIdx := -1
 	for idx, colName := range cols {
-		if strings.EqualFold(colName, targetCfg.CursorColumn) {
+		if strings.EqualFold(colName, cursorColumn) {
 			cursorColIdx = idx
 			break
 		}
@@ -430,7 +421,7 @@ func main() {
 		_, err = mitmPool.Exec(ctx, `
 			INSERT INTO raw_ingestion (topic, source_system, correlation_id, payload, nonce, dek_id, status)
 			VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, 'pending')
-		`, targetCfg.Topic, targetCfg.SourceName, encryptedPayload, nonce, dekID)
+		`, topicName, targetCfg.SourceName, encryptedPayload, nonce, dekID)
 		if err != nil {
 			log.Printf("Failed to insert raw fragment: %v", err)
 			continue

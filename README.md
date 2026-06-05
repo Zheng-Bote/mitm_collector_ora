@@ -47,18 +47,13 @@ The collector requires a single JSON parameter as a command-line argument.
 ```json
 {
   "host": "orahost",
-  "port": 5432,
+  "port": 1521,
   "user": "ora_user",
   "password": "ora_password",
   "database": "hr",
-  "table": "employees",
-  "source_name": "ORA_EMPLOYEE",
-  "cursor_column": "ID",
-  "topic": "employee.data"
+  "source_name": "ORA_EMPLOYEE"
 }
 ```
-
-_Note: `table` (the Oracle table name to read) is required. `cursor_column` defaults to `ID`. `topic` defaults to `oracle.<table_name>.data`._
 
 ---
 
@@ -92,12 +87,10 @@ export MASTER_KEY="Y29uZmlkZW50aWFsX21hc3Rlcl9rZXlfMzJfYnl0ZXM="
 # 2. Run the collector binary, passing the MitM connection details
 ./bin/mitm-collector-ora-employee '{
   "host": "127.0.0.1",
-  "port": 5432,
+  "port": 1521,
   "user": "orauser",
   "password": "yourpassword",
   "database": "hr",
-  "table": "EMPLOYEES",
-  "source_name": "ORA_EMPLOYEE",
-  "cursor_column": "ID"
+  "source_name": "ORA_EMPLOYEE"
 }'
 ```
