@@ -43,24 +43,28 @@ For code details, refer to:
 The collector accepts up to two JSON parameters as command-line arguments:
 
 #### 1. MitM Target DB Connection (`os.Args[1]`)
+
 A JSON string detailing the connection parameters to the central MitM target database.
 
 Example:
+
 ```json
 {
-  "host": "orahost",
-  "port": 1521,
-  "user": "ora_user",
-  "password": "ora_password",
-  "database": "hr",
+  "host": "localhost",
+  "port": 5432,
+  "user": "mitm_user",
+  "password": "mitm_password",
+  "database": "mitm",
   "source_name": "ORA_EMPLOYEE"
 }
 ```
 
 #### 2. Optional Job Overrides (`os.Args[2]`)
+
 An optional JSON string passed by the scheduler to override the default ingestion behaviour.
 
 Example:
+
 ```json
 {
   "source_name": "ORA_EMPLOYEE",
