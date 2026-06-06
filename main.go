@@ -373,11 +373,11 @@ func main() {
 	var query string
 	var queryArgs []interface{}
 	if lastCursor != "" {
-		query = fmt.Sprintf("SELECT * FROM %s WHERE %s > :1 ORDER BY %s ASC", 
+		query = fmt.Sprintf("SELECT * FROM %s WHERE %s > :1 ORDER BY %s ASC",
 			tableName, cursorColumn, cursorColumn)
 		queryArgs = append(queryArgs, lastCursor)
 	} else {
-		query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s ASC", 
+		query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s ASC",
 			tableName, cursorColumn)
 	}
 
