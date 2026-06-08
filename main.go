@@ -184,7 +184,7 @@ func main() {
 
 	// 3b. Parse optional collector arguments from scheduler (now in os.Args[1])
 	tableName := "employees"
-	cursorColumn := "id"
+	cursorColumn := "" // No default, to allow tables without 'id'
 	topicName := "employee.data"
 
 	if len(os.Args) >= 2 {
@@ -372,13 +372,15 @@ func main() {
 	// 13. Query Oracle table
 	var query string
 	var queryArgs []interface{}
-	if lastCursor != "" {
+	if lastCursor != "" && cursorColumn != "" {
 		query = fmt.Sprintf("SELECT * FROM %s WHERE %s > :1 ORDER BY %s ASC",
 			tableName, cursorColumn, cursorColumn)
 		queryArgs = append(queryArgs, lastCursor)
-	} else {
+	} else if cursorColumn != "" {
 		query = fmt.Sprintf("SELECT * FROM %s ORDER BY %s ASC",
 			tableName, cursorColumn)
+	} else {
+		query = fmt.Sprintf("SELECT * FROM %s", tableName)
 	}
 
 	rows, err := oracleDB.Query(query, queryArgs...)
