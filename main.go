@@ -1,5 +1,5 @@
 /**
- * SPDX-FileComment: Oracle Employee Collector
+ * SPDX-FileComment: Oracle Collector
  * SPDX-FileType: SOURCE
  * SPDX-FileContributor: ZHENG Robert
  * SPDX-FileCopyrightText: 2026 ZHENG Robert
@@ -37,6 +37,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/sijms/go-ora/v2"
+)
+
+var (
+	appName        = "Oracle Collector"
+	appDescription = "Retrieves data from an Oracle database table"
+	version        = "1.0.0"
 )
 
 // TargetDBConfig defines parameters for the MitM target database passed via JSON CLI argument
@@ -160,7 +166,8 @@ func main() {
 		}
 	}
 
-	ipc.SendEvent("started", "Employee collector program started", 0)
+	ipc.SendEvent("started", fmt.Sprintf("%s (%s) started", appName, version), 0)
+	ipc.SendAudit(fmt.Sprintf("%s (%s) started", appName, version))
 
 	// 3. Parse Target DB configuration from ENV
 	var targetCfg TargetDBConfig
