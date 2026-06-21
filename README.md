@@ -24,6 +24,7 @@ For code details, refer to:
 4.  **Ingestion**:
     - Serializes each database row map into a JSON string.
     - Encrypts the JSON payload via AES-GCM using the DEK and a fresh random nonce.
+    - Generates a deterministic `correlation_id` (UUIDv5) based on the specified `business_key_column` or fallback column.
     - Inserts the encrypted records into the target `raw_ingestion` table with a status of `pending`.
     - Updates the cursor offset to the highest processed ID.
 5.  **IPC Event Reporting**: Reports events (`started`, `processing`, `finished`, `failed`, and `audit`) to the scheduler via Unix Domain Socket.
@@ -54,9 +55,12 @@ Example:
   "source_name": "ORA_EMPLOYEE",
   "table": "EMPLOYEES",
   "cursor_column": "ID",
-  "topic": "employee.data"
+  "topic": "employee.data",
+  "business_key_column": "EMPLOYEE_ID"
 }
 ```
+
+* `business_key_column`: (Optional) Specifies the column to be used for generating the deterministic `correlation_id`. This is critical for **Stateful Aggregation**, allowing the Transformation Layer to join data from multiple sources. If omitted, it defaults to the `cursor_column` or "UNKNOWN".
 
 ---
 

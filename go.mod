@@ -3,6 +3,7 @@ module mitm_collector_ora-employee
 go 1.25.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/sijms/go-ora/v2 v2.8.21
 )
