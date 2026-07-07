@@ -29,6 +29,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -253,8 +254,12 @@ func main() {
 	if targetCfg.DSN != "" {
 		mitmDSN = targetCfg.DSN
 	} else {
-		mitmDSN = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-			targetCfg.User, targetCfg.Password, targetCfg.Host, targetCfg.Port, targetCfg.Database)
+		sslMode := "disable"
+		if os.Getenv("MITM_DB_SSLMODE") == "true" {
+			sslMode = "require"
+		}
+		mitmDSN = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+			targetCfg.User, targetCfg.Password, targetCfg.Host, targetCfg.Port, targetCfg.Database, sslMode)
 	}
 
 	ctx := context.Background()
@@ -262,8 +267,10 @@ func main() {
 	// 4. Connect to MitM target database (PostgreSQL)
 	mitmPool, err := pgxpool.New(ctx, mitmDSN)
 	if err != nil {
-		ipc.SendEvent("failed", fmt.Sprintf("Failed to connect to MitM database: %v", err), 0)
-		log.Fatalf("Failed to connect to MitM database: %v", err)
+		msg := fmt.Sprintf("Failed to connect to MitM database: %v", err)
+		ipc.SendEvent("failed", msg, 0)
+		ipc.SendAudit("ERROR: " + msg)
+		log.Fatalf(msg)
 	}
 	defer mitmPool.Close()
 
@@ -383,21 +390,30 @@ func main() {
 		if dbName == "" {
 			dbName = sourceCfg.Database
 		}
-		oracleDSN = fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
-			sourceCfg.User, sourceCfg.Password, sourceCfg.Host, sourceCfg.Port, dbName)
+		u := &url.URL{
+			Scheme: "oracle",
+			User:   url.UserPassword(sourceCfg.User, sourceCfg.Password),
+			Host:   fmt.Sprintf("%s:%d", sourceCfg.Host, sourceCfg.Port),
+			Path:   dbName,
+		}
+		oracleDSN = u.String()
 	}
 
 	// 11. Connect to Oracle source database
 	oracleDB, err := sql.Open("oracle", oracleDSN)
 	if err != nil {
-		ipc.SendEvent("failed", fmt.Sprintf("Failed to connect to Oracle source database: %v", err), 0)
-		log.Fatalf("Failed to connect to Oracle source: %v", err)
+		msg := fmt.Sprintf("Failed to connect to Oracle source database: %v", err)
+		ipc.SendEvent("failed", msg, 0)
+		ipc.SendAudit("ERROR: " + msg)
+		log.Fatalf(msg)
 	}
 	defer oracleDB.Close()
 
 	if err := oracleDB.Ping(); err != nil {
-		ipc.SendEvent("failed", fmt.Sprintf("Failed to ping Oracle source database: %v", err), 0)
-		log.Fatalf("Failed to ping Oracle source: %v", err)
+		msg := fmt.Sprintf("Failed to ping Oracle source database: %v", err)
+		ipc.SendEvent("failed", msg, 0)
+		ipc.SendAudit("ERROR: " + msg)
+		log.Fatalf(msg)
 	}
 
 	ipc.SendEvent("processing", "Connected to Oracle source database", 50)

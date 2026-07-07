@@ -5,6 +5,15 @@ All notable changes to the Oracle Collector will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.10.0] - 2026-07-07
+
+### Added
+- **SSL Support**: Added support for the `MITM_DB_SSLMODE` environment variable. The collector now respects this setting and applies it to the MitM PostgreSQL connection string.
+- **Robust Audit Logging**: Connection errors to both the MitM database and the Oracle source database are now explicitly logged to the central Audit Log via `ipc.SendAudit()`.
+
+### Fixed
+- **URL Encoding for Passwords**: Refactored the Oracle DSN construction to use `net/url` (`url.UserPassword`). This fixes a bug where source passwords containing spaces or special characters (e.g., `+`) caused an "invalid userinfo" error during connection.
+
 ## [v0.9.0] - 2026-06-30
 
 ### Changed
