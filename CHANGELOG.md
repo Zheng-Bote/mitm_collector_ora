@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Robust Audit Logging**: Connection errors to both the MitM database and the Oracle source database are now explicitly logged to the central Audit Log via `ipc.SendAudit()`.
 
 ### Fixed
-- **URL Encoding for Passwords**: Refactored the Oracle DSN construction to use `net/url` (`url.UserPassword`). This fixes a bug where source passwords containing spaces or special characters (e.g., `+`) caused an "invalid userinfo" error during connection.
+- **Oracle Connection DSN**: Switched to using `go_ora.BuildUrl()` instead of `net/url` to generate the connection string. This fixes a bug where URL-encoding of special characters in the password (e.g., `+` to `%2B`) caused authentication failures (Ping-Timeout) because the `go-ora` driver does not URL-decode credentials.
 
 ## [v0.9.0] - 2026-06-30
 

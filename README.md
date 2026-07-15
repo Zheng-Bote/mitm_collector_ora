@@ -4,8 +4,8 @@ The **Oracle Table Data Collector** is an autonomous Go program designed to run 
 
 For code details, refer to:
 
-- [main.go](file:///home/zb_bamboo/DEV/__NEW__/Go/mitm-2/collector-layer/mitm_collector_ora-employee/main.go) - Dynamic row reading, encryption, and ingestion logic.
-- [go.mod](file:///home/zb_bamboo/DEV/__NEW__/Go/mitm-2/collector-layer/mitm_collector_ora-employee/go.mod) - Dependency definition.
+- [main.go](main.go) - Dynamic row reading, encryption, and ingestion logic.
+- [go.mod](go.mod) - Dependency definition.
 
 ---
 
@@ -62,7 +62,7 @@ Example:
 }
 ```
 
-* `business_key_column`: (Optional) Specifies the column to be used for generating the deterministic `correlation_id`. This is critical for **Stateful Aggregation**, allowing the Transformation Layer to join data from multiple sources. If omitted, it defaults to the `cursor_column` or "UNKNOWN".
+- `business_key_column`: (Optional) Specifies the column to be used for generating the deterministic `correlation_id`. This is critical for **Stateful Aggregation**, allowing the Transformation Layer to join data from multiple sources. If omitted, it defaults to the `cursor_column` or "UNKNOWN".
 
 ---
 
@@ -77,11 +77,11 @@ Example:
 To compile the collector into a standalone executable, navigate to the collector directory and build:
 
 ```bash
-cd /home/zb_bamboo/DEV/__NEW__/Go/mitm-2/collector-layer/mitm_collector_ora-employee
-go build -o bin/mitm-collector-ora-employee main.go
+cd /home/zb_bamboo/DEV/__NEW__/Go/mitm-2/collector-layer/mitm_collector_ora
+go build -o bin/mitm-collector-ora main.go
 ```
 
-This compiles a static executable `mitm-collector-ora-employee` inside the local `bin/` directory.
+This compiles a static executable `mitm-collector-ora` inside the local `bin/` directory.
 
 ---
 
@@ -93,16 +93,32 @@ To test the binary manually from the command line:
 # 1. Export the Master Key (must match the one used during DB initialization)
 export MASTER_KEY="Y29uZmlkZW50aWFsX21hc3Rlcl9rZXlfMzJfYnl0ZXM="
 
-# 2. Run the collector binary, passing the MitM connection details and optional overrides
-export MITM_DB_CONFIG_JSON='{"db":{"host":"127.0.0.1","port":5432,"user":"mitm_user","password":"...","database":"mitm"}}'
+# 2. Provide MitM Database configuration (Preferred JSON format)
+export MITM_DB_CONFIG_JSON='{"db":{"host":"127.0.0.1","port":5432,"user":"mitm_user","password":"mitm_password","database":"mitm_db"}}'
 
-# Or via Direct Environment Variables (Fallback)
+# 3. Run the collector binary, passing the optional JSON arguments (Overrides)
+# This example reads from the 'EMPLOYEES' table, uses 'EMPLOYEE_ID' as correlation key,
+# and tracks the 'ID' column for incremental extraction.
+./bin/mitm-collector-ora '{
+  "source_name": "ORA_EMPLOYEE",
+  "table": "EMPLOYEES",
+  "cursor_column": "ID",
+  "topic": "employee.data",
+  "business_key_column": "EMPLOYEE_ID"
+}'
+```
+
+### Alternative: Direct Environment Variables (Fallback)
+
+If you prefer not to use `MITM_DB_CONFIG_JSON`, you can configure the MitM connection explicitly:
+
+```bash
 export MITM_DB_HOST="127.0.0.1"
-export MITM_DB_PORT="1521"
-export MITM_DB_USER="orauser"
-export MITM_DB_PASSWORD="yourpassword"
-export MITM_DB_NAME="hr"
+export MITM_DB_PORT="5432"
+export MITM_DB_USER="mitm_user"
+export MITM_DB_PASSWORD="mitm_password"
+export MITM_DB_NAME="mitm_db"
 export MITM_DB_SSLMODE="true"
 
-./bin/mitm-collector-ora-employee '{"source_name": "ORA_EMPLOYEE", "table": "EMPLOYEES", "cursor_column": "ID", "topic": "employee.data"}'
+./bin/mitm-collector-ora '{"source_name": "ORA_EMPLOYEE", "table": "EMPLOYEES", "cursor_column": "ID", "topic": "employee.data", "business_key_column": "EMPLOYEE_ID"}'
 ```

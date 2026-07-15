@@ -29,7 +29,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -38,7 +37,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/sijms/go-ora/v2"
+	go_ora "github.com/sijms/go-ora/v2"
 )
 
 var (
@@ -378,6 +377,8 @@ func main() {
 		log.Fatalf("Failed to parse decrypted source config: %v", err)
 	}
 
+	ipc.SendAudit(fmt.Sprintf("DEBUG: Trying to connect to Oracle at %s:%d with Service '%s' (User: %s)", sourceCfg.Host, sourceCfg.Port, sourceCfg.Service, sourceCfg.User))
+
 	var oracleDSN string
 	if sourceCfg.DSN != "" {
 		oracleDSN = sourceCfg.DSN
@@ -390,13 +391,7 @@ func main() {
 		if dbName == "" {
 			dbName = sourceCfg.Database
 		}
-		u := &url.URL{
-			Scheme: "oracle",
-			User:   url.UserPassword(sourceCfg.User, sourceCfg.Password),
-			Host:   fmt.Sprintf("%s:%d", sourceCfg.Host, sourceCfg.Port),
-			Path:   dbName,
-		}
-		oracleDSN = u.String()
+		oracleDSN = go_ora.BuildUrl(sourceCfg.Host, sourceCfg.Port, dbName, sourceCfg.User, sourceCfg.Password, nil)
 	}
 
 	// 11. Connect to Oracle source database
