@@ -43,7 +43,7 @@ import (
 var (
 	appName        = "Oracle Collector"
 	appDescription = "Extracts data from Oracle databases"
-	version        = "0.11.0"
+	version        = "0.12.0"
 )
 
 // TargetDBConfig defines parameters for the MitM target database passed via JSON CLI argument
@@ -185,7 +185,7 @@ func main() {
 	var targetCfg TargetDBConfig
 	configSource := "Environment Variables"
 	jsonConfig := os.Getenv("MITM_DB_CONFIG_JSON")
-	
+
 	if jsonConfig != "" {
 		var fullCfg struct {
 			DB struct {
@@ -261,6 +261,10 @@ func main() {
 		} else {
 			log.Printf("Warning: Failed to parse collector arguments from os.Args[1]: %v", err)
 		}
+	}
+
+	if strings.ToLower(cursorColumn) == "none" {
+		cursorColumn = ""
 	}
 
 	var mitmDSN string
@@ -528,7 +532,7 @@ func main() {
 		} else if currentCursorVal != "" {
 			businessKey = currentCursorVal
 		} else {
-			businessKey = "UNKNOWN"
+			businessKey = uuid.New().String()
 		}
 
 		// Generate deterministic Correlation ID
@@ -566,7 +570,7 @@ func main() {
 	}
 
 	// 16. Finish execution
+	ipc.SendAudit(fmt.Sprintf("Successfully processed and ingested %d Oracle records into RAW table", recordsIngested))
 	ipc.SendAudit(fmt.Sprintf("%s (%s) finished", appName, version))
-	ipc.SendEvent("finished", fmt.Sprintf("Successfully processed and ingested %d Oracle records into RAW table", recordsIngested), 100)
 	log.Printf("Collector finished. Ingested %d records.", recordsIngested)
 }
