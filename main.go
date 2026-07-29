@@ -163,6 +163,8 @@ func cleanValue(val interface{}) interface{} {
 }
 
 func main() {
+	version = strings.Split(version, "-")[0]
+
 	// 2. Load IPC Environment
 	var ipc *IPCClient
 	runIDStr := os.Getenv("RUN_ID")
