@@ -43,7 +43,7 @@ import (
 var (
 	appName        = "Oracle Collector"
 	appDescription = "Extracts data from Oracle databases"
-	version        = "0.12.0"
+	version        = "0.14.0"
 )
 
 // TargetDBConfig defines parameters for the MitM target database passed via JSON CLI argument
@@ -404,14 +404,16 @@ func main() {
 		oracleDSN = sourceCfg.DSN
 	} else {
 		// Build connection url for github.com/sijms/go-ora/v2
+		var urlOptions map[string]string
 		dbName := sourceCfg.Service
-		if dbName == "" {
-			dbName = sourceCfg.SID
-		}
-		if dbName == "" {
+		if dbName == "" && sourceCfg.SID != "" {
+			urlOptions = map[string]string{
+				"SID": sourceCfg.SID,
+			}
+		} else if dbName == "" && sourceCfg.Database != "" {
 			dbName = sourceCfg.Database
 		}
-		oracleDSN = go_ora.BuildUrl(sourceCfg.Host, sourceCfg.Port, dbName, sourceCfg.User, sourceCfg.Password, nil)
+		oracleDSN = go_ora.BuildUrl(sourceCfg.Host, sourceCfg.Port, dbName, sourceCfg.User, sourceCfg.Password, urlOptions)
 	}
 
 	// 11. Connect to Oracle source database
