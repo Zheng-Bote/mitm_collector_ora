@@ -30,9 +30,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"regexp"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -41,6 +44,7 @@ import (
 )
 
 var (
+	identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 	appName        = "Oracle Collector"
 	appDescription = "Extracts data from Oracle databases"
 	version        = "0.14.0"
@@ -162,6 +166,24 @@ func cleanValue(val interface{}) interface{} {
 	}
 }
 
+func validateKEK(masterKey string) ([]byte, error) {
+	if masterKey == "" {
+		return nil, fmt.Errorf("Missing MASTER_KEY environment variable")
+	}
+
+	var kek []byte
+	if decoded, err := base64.StdEncoding.DecodeString(masterKey); err == nil && len(decoded) == 32 {
+		kek = decoded
+	} else {
+		kek = []byte(masterKey)
+	}
+
+	if len(kek) != 32 {
+		return nil, fmt.Errorf("MASTER_KEY must be exactly 32 bytes, got %d", len(kek))
+	}
+	return kek, nil
+}
+
 func main() {
 	version = strings.Split(version, "-")[0]
 
@@ -244,10 +266,22 @@ func main() {
 				targetCfg.SourceName = colArgs.SourceName
 			}
 			if colArgs.Table != "" {
+				if !identifierRegex.MatchString(colArgs.Table) {
+					if ipc != nil {
+						ipc.SendEvent("failed", "Invalid table name format", 0)
+					}
+					log.Fatal("Invalid table name format")
+				}
 				tableName = colArgs.Table
 				topicName = fmt.Sprintf("ora.%s.data", strings.ToLower(tableName))
 			}
 			if colArgs.CursorColumn != "" {
+				if colArgs.CursorColumn != "none" && !identifierRegex.MatchString(colArgs.CursorColumn) {
+					if ipc != nil {
+						ipc.SendEvent("failed", "Invalid cursor column name format", 0)
+					}
+					log.Fatal("Invalid cursor column name format")
+				}
 				cursorColumn = colArgs.CursorColumn
 			}
 			if colArgs.Topic != "" {
@@ -281,15 +315,25 @@ func main() {
 			targetCfg.User, targetCfg.Password, targetCfg.Host, targetCfg.Port, targetCfg.Database, sslMode)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
 	// 4. Connect to MitM target database (PostgreSQL)
-	mitmPool, err := pgxpool.New(ctx, mitmDSN)
+	config_mitmPool, err := pgxpool.ParseConfig(mitmDSN)
+	if err == nil {
+		config_mitmPool.MaxConns = 20
+		config_mitmPool.MaxConnIdleTime = 5 * time.Minute
+		config_mitmPool.MaxConnLifetime = 1 * time.Hour
+	}
+	var mitmPool *pgxpool.Pool
+	if err == nil {
+		mitmPool, err = pgxpool.NewWithConfig(ctx, config_mitmPool)
+	}
 	if err != nil {
 		msg := fmt.Sprintf("Failed to connect to MitM database: %v", err)
 		ipc.SendEvent("failed", msg, 0)
 		ipc.SendAudit("ERROR: " + msg)
-		log.Fatalf(msg)
+		log.Fatal(msg)
 	}
 	defer mitmPool.Close()
 
@@ -297,23 +341,12 @@ func main() {
 
 	// 5. Load KEK from environment
 	masterKey := os.Getenv("MASTER_KEY")
-	if masterKey == "" {
-		ipc.SendEvent("failed", "Missing MASTER_KEY environment variable", 0)
-		log.Fatal("Missing MASTER_KEY environment variable")
-	}
-
-	var kek []byte
-	if decoded, err := base64.StdEncoding.DecodeString(masterKey); err == nil {
-		kek = decoded
-	} else {
-		kek = []byte(masterKey)
-	}
-
-	// Adjust KEK to 32 bytes if necessary
-	if len(kek) != 32 {
-		adjusted := make([]byte, 32)
-		copy(adjusted, kek)
-		kek = adjusted
+	kek, err := validateKEK(masterKey)
+	if err != nil {
+		if ipc != nil {
+			ipc.SendEvent("failed", err.Error(), 0)
+		}
+		log.Fatal(err)
 	}
 
 	// 6. Query encrypted source credentials
@@ -422,7 +455,7 @@ func main() {
 		msg := fmt.Sprintf("Failed to connect to Oracle source database: %v", err)
 		ipc.SendEvent("failed", msg, 0)
 		ipc.SendAudit("ERROR: " + msg)
-		log.Fatalf(msg)
+		log.Fatal(msg)
 	}
 	defer oracleDB.Close()
 
@@ -430,7 +463,7 @@ func main() {
 		msg := fmt.Sprintf("Failed to ping Oracle source database: %v", err)
 		ipc.SendEvent("failed", msg, 0)
 		ipc.SendAudit("ERROR: " + msg)
-		log.Fatalf(msg)
+		log.Fatal(msg)
 	}
 
 	ipc.SendEvent("processing", "Connected to Oracle source database", 50)
@@ -479,10 +512,24 @@ func main() {
 		}
 	}
 
+	tx, err := mitmPool.Begin(ctx)
+	if err != nil {
+		if ipc != nil {
+			ipc.SendEvent("failed", fmt.Sprintf("Failed to begin transaction: %v", err), 0)
+		}
+		log.Fatalf("Failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
 	recordsIngested := 0
+	recordsFailed := 0
 	maxCursorValue := ""
 
 	ipc.SendEvent("processing", "Preparing dynamic record ingestion", 70)
+
+	batch := &pgx.Batch{}
+	batchSize := 0
+	const maxBatchSize = 1000
 
 	for rows.Next() {
 		// Slice of interfaces to hold raw values scanned
@@ -495,6 +542,7 @@ func main() {
 		err = rows.Scan(valuePtrs...)
 		if err != nil {
 			log.Printf("Failed to scan Oracle row: %v", err)
+			recordsFailed++
 			continue
 		}
 
@@ -516,6 +564,7 @@ func main() {
 		rowJSON, err := json.Marshal(rowMap)
 		if err != nil {
 			log.Printf("Failed to marshal row to JSON: %v", err)
+			recordsFailed++
 			continue
 		}
 
@@ -523,6 +572,7 @@ func main() {
 		nonce := make([]byte, 12)
 		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 			log.Printf("Failed to generate random nonce: %v", err)
+			recordsFailed++
 			continue
 		}
 
@@ -536,7 +586,9 @@ func main() {
 		} else if currentCursorVal != "" {
 			businessKey = currentCursorVal
 		} else {
-			businessKey = uuid.New().String()
+			log.Printf("Missing business key for record, skipping")
+			recordsFailed++
+			continue
 		}
 
 		// Generate deterministic Correlation ID
@@ -544,37 +596,74 @@ func main() {
 		correlationID := uuid.NewSHA1(namespaceMitM, []byte(businessKey))
 
 		// Insert into raw_ingestion in target database
-		_, err = mitmPool.Exec(ctx, `
+		batch.Queue(`
 			INSERT INTO raw_ingestion (topic, source_system, correlation_id, payload, nonce, dek_id, status)
 			VALUES ($1, $2, $3, $4, $5, $6, 'pending')
 		`, topicName, targetCfg.SourceName, correlationID, encryptedPayload, nonce, dekID)
-		if err != nil {
-			log.Printf("Failed to insert raw fragment: %v", err)
-			continue
-		}
-
+		batchSize++
 		recordsIngested++
+
 		if currentCursorVal != "" {
 			maxCursorValue = currentCursorVal
+		}
+
+		if batchSize >= maxBatchSize {
+			br := tx.SendBatch(ctx, batch)
+			var batchErr error
+			for i := 0; i < batchSize; i++ {
+				_, err := br.Exec()
+				if err != nil {
+					batchErr = err
+				}
+			}
+			err = br.Close()
+			if batchErr != nil || err != nil {
+				log.Printf("Batch insert failed: %v, %v", batchErr, err)
+				recordsFailed += batchSize
+				recordsIngested -= batchSize
+			}
+			batch = &pgx.Batch{}
+			batchSize = 0
 		}
 	}
 
 	// 15. Update cursor if records were ingested
 	if recordsIngested > 0 && maxCursorValue != "" {
-		_, err = mitmPool.Exec(ctx, `
+		batch.Queue(`
 			INSERT INTO ingestion_cursors (source_name, last_cursor, updated_at)
 			VALUES ($1, $2, NOW())
 			ON CONFLICT (source_name) 
 			DO UPDATE SET last_cursor = EXCLUDED.last_cursor, updated_at = NOW()
 		`, targetCfg.SourceName, maxCursorValue)
-		if err != nil {
-			log.Printf("Failed to save current cursor state: %v", err)
-		}
+		batchSize++
 		ipc.SendAudit(fmt.Sprintf("Ingested %d Oracle records. Cursor updated to %s.", recordsIngested, maxCursorValue))
 	}
 
+	if batchSize > 0 {
+		br := tx.SendBatch(ctx, batch)
+		var batchErr error
+		for i := 0; i < batchSize; i++ {
+			_, err := br.Exec()
+			if err != nil {
+				batchErr = err
+			}
+		}
+		err = br.Close()
+		if batchErr != nil || err != nil {
+			log.Printf("Final batch insert failed: %v, %v", batchErr, err)
+		}
+	}
+
+	// 15b. Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		if ipc != nil {
+			ipc.SendEvent("failed", fmt.Sprintf("Failed to commit transaction: %v", err), 0)
+		}
+		log.Fatalf("Failed to commit transaction: %v", err)
+	}
+
 	// 16. Finish execution
-	ipc.SendAudit(fmt.Sprintf("Successfully processed and ingested %d Oracle records into RAW table", recordsIngested))
+	ipc.SendAudit(fmt.Sprintf("Successfully processed and ingested %d Oracle records into RAW table (Failed: %d)", recordsIngested, recordsFailed))
 	ipc.SendAudit(fmt.Sprintf("%s (%s) finished", appName, version))
-	log.Printf("Collector finished. Ingested %d records.", recordsIngested)
+	log.Printf("Collector finished. Ingested %d records (Failed: %d).", recordsIngested, recordsFailed)
 }

@@ -5,7 +5,15 @@ All notable changes to the Oracle Collector will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.14.0] - 2026-08-04
+## [v0.15.0] - 2026-08-29
+
+### Changed/Added
+
+- Configured `pgxpool` connection limits (`MaxConns=20`, `MaxConnIdleTime=5m`, `MaxConnLifetime=1h`).
+- Implemented graceful shutdown with context cancellation on `SIGINT`/`SIGTERM`.
+- Optimized performance with batched operations.
+
+## [v0.14.0] - 2026-08-29
 
 ### Fixed
 
