@@ -525,15 +525,6 @@ func main() {
 		}
 	}
 
-	tx, err := mitmPool.Begin(ctx)
-	if err != nil {
-		if ipc != nil {
-			ipc.SendEvent("failed", fmt.Sprintf("Failed to begin transaction: %v", err), 0)
-		}
-		log.Fatalf("Failed to begin transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-
 	recordsIngested := 0
 	recordsFailed := 0
 	maxCursorValue := ""
@@ -543,6 +534,66 @@ func main() {
 	batch := &pgx.Batch{}
 	batchSize := 0
 	const maxBatchSize = 1000
+
+	executeBatch := func(cursorToSave string) {
+		if batchSize == 0 {
+			return
+		}
+		
+		if cursorToSave != "" {
+			batch.Queue(`
+				INSERT INTO ingestion_cursors (source_name, last_cursor, updated_at)
+				VALUES ($1, $2, NOW())
+				ON CONFLICT (source_name) 
+				DO UPDATE SET last_cursor = EXCLUDED.last_cursor, updated_at = NOW()
+			`, targetCfg.SourceName, cursorToSave)
+		}
+		
+		tx, err := mitmPool.Begin(ctx)
+		if err != nil {
+			log.Printf("Failed to begin transaction for batch: %v", err)
+			recordsFailed += batchSize
+			batch = &pgx.Batch{}
+			batchSize = 0
+			return
+		}
+		
+		br := tx.SendBatch(ctx, batch)
+		
+		var batchError error
+		for i := 0; i < batchSize; i++ {
+			_, err := br.Exec()
+			if err != nil {
+				batchError = err
+				break
+			}
+		}
+		
+		if cursorToSave != "" && batchError == nil {
+			_, err := br.Exec()
+			if err != nil {
+				batchError = err
+			}
+		}
+		
+		br.Close()
+		
+		if batchError != nil {
+			tx.Rollback(ctx)
+			log.Printf("Batch exec error: %v", batchError)
+			recordsFailed += batchSize
+		} else {
+			if err := tx.Commit(ctx); err != nil {
+				log.Printf("Failed to commit batch tx: %v", err)
+				recordsFailed += batchSize
+			} else {
+				recordsIngested += batchSize
+			}
+		}
+		
+		batch = &pgx.Batch{}
+		batchSize = 0
+	}
 
 	for rows.Next() {
 		// Slice of interfaces to hold raw values scanned
@@ -614,65 +665,20 @@ func main() {
 			VALUES ($1, $2, $3, $4, $5, $6, 'pending')
 		`, topicName, targetCfg.SourceName, correlationID, encryptedPayload, nonce, dekID)
 		batchSize++
-		recordsIngested++
-
 		if currentCursorVal != "" {
 			maxCursorValue = currentCursorVal
 		}
 
 		if batchSize >= maxBatchSize {
-			br := tx.SendBatch(ctx, batch)
-			var batchErr error
-			for i := 0; i < batchSize; i++ {
-				_, err := br.Exec()
-				if err != nil {
-					batchErr = err
-				}
-			}
-			err = br.Close()
-			if batchErr != nil || err != nil {
-				log.Printf("Batch insert failed: %v, %v", batchErr, err)
-				recordsFailed += batchSize
-				recordsIngested -= batchSize
-			}
-			batch = &pgx.Batch{}
-			batchSize = 0
+			executeBatch(maxCursorValue)
 		}
 	}
 
-	// 15. Update cursor if records were ingested
+	// 15. Execute any remaining records in the final batch
+	executeBatch(maxCursorValue)
+
 	if recordsIngested > 0 && maxCursorValue != "" {
-		batch.Queue(`
-			INSERT INTO ingestion_cursors (source_name, last_cursor, updated_at)
-			VALUES ($1, $2, NOW())
-			ON CONFLICT (source_name) 
-			DO UPDATE SET last_cursor = EXCLUDED.last_cursor, updated_at = NOW()
-		`, targetCfg.SourceName, maxCursorValue)
-		batchSize++
 		ipc.SendAudit(fmt.Sprintf("Ingested %d Oracle records. Cursor updated to %s.", recordsIngested, maxCursorValue))
-	}
-
-	if batchSize > 0 {
-		br := tx.SendBatch(ctx, batch)
-		var batchErr error
-		for i := 0; i < batchSize; i++ {
-			_, err := br.Exec()
-			if err != nil {
-				batchErr = err
-			}
-		}
-		err = br.Close()
-		if batchErr != nil || err != nil {
-			log.Printf("Final batch insert failed: %v, %v", batchErr, err)
-		}
-	}
-
-	// 15b. Commit transaction
-	if err := tx.Commit(ctx); err != nil {
-		if ipc != nil {
-			ipc.SendEvent("failed", fmt.Sprintf("Failed to commit transaction: %v", err), 0)
-		}
-		log.Fatalf("Failed to commit transaction: %v", err)
 	}
 
 	// 16. Finish execution
