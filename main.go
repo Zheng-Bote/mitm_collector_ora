@@ -48,7 +48,7 @@ var (
 	identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 	appName        = "Oracle Collector"
 	appDescription = "Extracts data from Oracle databases"
-	version        = "0.16.0"
+	version        = "0.16.1"
 )
 
 // TargetDBConfig defines parameters for the MitM target database passed via JSON CLI argument
