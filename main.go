@@ -48,7 +48,7 @@ var (
 	identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 	appName        = "Oracle Collector"
 	appDescription = "Extracts data from Oracle databases"
-	version        = "0.16.1"
+	version        = "0.16.2"
 )
 
 // TargetDBConfig defines parameters for the MitM target database passed via JSON CLI argument
@@ -231,7 +231,7 @@ func main() {
 				User     string `json:"user"`
 				Password string `json:"password"`
 				Database string `json:"database"`
-				SSLMode  string `json:"sslmode"`
+				SSLMode  bool   `json:"sslmode"`
 			} `json:"db"`
 		}
 		if err := json.Unmarshal([]byte(jsonConfig), &fullCfg); err != nil {
@@ -245,8 +245,10 @@ func main() {
 		targetCfg.User = fullCfg.DB.User
 		targetCfg.Password = fullCfg.DB.Password
 		targetCfg.Database = fullCfg.DB.Database
-		if fullCfg.DB.SSLMode != "" {
-			os.Setenv("MITM_DB_SSLMODE", fullCfg.DB.SSLMode)
+		if fullCfg.DB.SSLMode {
+			os.Setenv("MITM_DB_SSLMODE", "require")
+		} else {
+			os.Setenv("MITM_DB_SSLMODE", "disable")
 		}
 		configSource = "JSON Config (MITM_DB_CONFIG_JSON)"
 	} else {
